@@ -150,6 +150,10 @@ class Store:
             )
         return cur.lastrowid
 
+    def set_step_checks(self, step_id: int, checks: list) -> None:
+        with self.db:
+            self.db.execute("UPDATE steps SET checks=? WHERE id=?", (json.dumps(checks, ensure_ascii=False), step_id))
+
     def get_step(self, step_id: int):
         return self.db.execute("SELECT * FROM steps WHERE id=?", (step_id,)).fetchone()
 

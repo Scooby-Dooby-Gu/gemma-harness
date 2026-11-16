@@ -54,6 +54,7 @@ def limits(args) -> dict:
         "verify": not args.no_verify,
         "always_inspect": args.always_inspect,
         "memory": not args.no_memory,
+        "late_checks": not args.no_late_checks,
     }
 
 
@@ -218,6 +219,8 @@ def main() -> int:
         p.add_argument("--web", action="store_true", help="give the model web_search and fetch_url")
         p.add_argument("--no-memory", action="store_true", help="neither use nor save notes from other runs")
         p.add_argument("--no-verify", action="store_true", help="skip the independent check of each step")
+        p.add_argument("--no-late-checks", action="store_true",
+                       help="use the plan's checks as written, without rewriting them before each step")
         p.add_argument("--always-inspect", action="store_true",
                        help="also have the model inspect steps whose automatic checks passed")
         p.add_argument("--max-minutes", type=float, default=30, help="time limit for this session of the run")

@@ -90,6 +90,24 @@ class PlanError(RuntimeError):
     pass
 
 
+def defer_repeated_commands(steps: list[dict]) -> list[dict]:
+    """Drop a command check from a step when a later step carries the same one.
+
+    The same command on an early and a late step is the task's end condition (usually
+    "the tests pass"). On the early step it cannot be true yet, and it would get good
+    work rejected. Returns the checks that were removed.
+    """
+    removed = []
+    for i, step in enumerate(steps):
+        later = {
+            c["command"] for s in steps[i + 1:] for c in s["checks"] if c["type"] == "command_succeeds"
+        }
+        keep = [c for c in step["checks"] if not (c["type"] == "command_succeeds" and c["command"] in later)]
+        removed += [{"step": i + 1, **c} for c in step["checks"] if c not in keep]
+        step["checks"] = keep
+    return removed
+
+
 def _validate(args, allowed: set[str]) -> tuple[list[dict], list]:
     if isinstance(args, str):
         args = json.loads(args)
@@ -151,6 +169,7 @@ def _ask(client: Ollama, store: Store, run_id: int, kind: str, tool_names: list[
             continue
         try:
             steps, dropped = _validate(call["function"].get("arguments"), allowed)
+            deferred = defer_repeated_commands(steps)
         except (ValueError, json.JSONDecodeError) as e:
             problem = str(e)
             messages.append(
@@ -165,6 +184,7 @@ def _ask(client: Ollama, store: Store, run_id: int, kind: str, tool_names: list[
                 "user": user,
                 "steps": steps,
                 "dropped_checks": dropped,
+                "deferred_checks": deferred,
                 "thinking": msg.get("thinking", ""),
                 "tokens_in": resp.get("prompt_eval_count", 0),
                 "tokens_out": resp.get("eval_count", 0),

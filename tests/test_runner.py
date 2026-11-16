@@ -14,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from harness.checks import run_checks  # noqa: E402
+from harness.planner import defer_repeated_commands  # noqa: E402
 from harness.memory import recall_notes  # noqa: E402
 from harness.runner import run  # noqa: E402
 from harness.store import Store  # noqa: E402
@@ -73,6 +74,8 @@ class RunnerTest(unittest.TestCase):
     def go(self, model, **kw):
         kw.setdefault("verify", False)
         kw.setdefault("memory", False)
+        kw.setdefault("final_check", False)
+        kw.setdefault("late_checks", False)
         return run(self.store, model, self.toolbox, self.run_id, report=lambda *_: None, **kw)
 
     def statuses(self):
@@ -240,6 +243,106 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(self.go(model, verify=True), "done")
         self.assertIn("still contains 'get_usr' on line(s) 2", model.prompts[6][1]["content"])
         self.assertIn("get_user", model.prompts[5][-1]["content"])  # the re-read returned the file
+
+    def test_final_check_sends_an_unfinished_task_back_for_more_work(self):
+        # The plan only looks at the file, and its step passes. The final check notices the task is not done.
+        ws = self.toolbox.workspace
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "a.txt").write_text("old")
+        exists = [{"type": "file_exists", "path": "a.txt"}]
+        model = FakeModel([
+            plan_with("read a.txt", exists),
+            call("read_file", path="a.txt"), finish("done"),
+            call("read_file", path="a.txt"), verdict(False, "a.txt still says old"),
+            plan_with("change a.txt to new", exists),
+            call("write_file", path="a.txt", content="new"), finish("done"),
+            verdict(True, "a.txt was changed to new"),  # its check was already true, so the change is inspected
+            verdict(True, "a.txt says new"),
+        ])
+        self.assertEqual(self.go(model, verify=True, final_check=True), "done")
+        self.assertEqual(self.statuses(), ["done", "failed", "done"])
+        self.assertIn("a.txt still says old", model.prompts[5][1]["content"])  # the re-planner is told
+        self.assertNotIn("write_file", [t["function"]["name"] for t in model.tools[3]])  # read-only
+
+    def test_final_check_failure_ends_the_run_as_failed_when_replans_are_used_up(self):
+        model = FakeModel([
+            plan("write a.txt"),
+            call("write_file", path="a.txt", content="A"), finish("done"), verdict(True, "ok"),
+            verdict(False, "b.txt is missing"),
+        ])
+        self.assertEqual(self.go(model, verify=True, final_check=True, max_replans=0), "failed")
+
+    def test_check_that_was_already_true_does_not_prove_a_change(self):
+        # Half a rename: app.py already contains get_user before the step, so that check proves nothing.
+        ws = self.toolbox.workspace
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "app.py").write_text("from users import get_user\nprint(get_usr(1))\n")
+        model = FakeModel([
+            plan_with("finish the rename in app.py", [{"type": "file_contains", "path": "app.py", "text": "get_user"}]),
+            call("edit_file", path="app.py", old_text="import get_user", new_text="import  get_user"),
+            finish("done"),
+            call("read_file", path="app.py"), verdict(False, "line 2 still calls get_usr"),
+            call("edit_file", path="app.py", old_text="get_usr(1)", new_text="get_user(1)"),
+            finish("done"),
+            verdict(True, "no get_usr left"),
+        ])
+        self.assertEqual(self.go(model, verify=True), "done")
+        self.assertIn("already true before it started", model.prompts[3][1]["content"])
+        self.assertIn("line 2 still calls get_usr", model.prompts[5][1]["content"])
+
+    def test_look_only_step_with_stale_checks_needs_no_inspection(self):
+        ws = self.toolbox.workspace
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "a.txt").write_text("A")
+        model = FakeModel([
+            plan_with("read a.txt", [{"type": "file_exists", "path": "a.txt"}]),
+            call("read_file", path="a.txt"), finish("done"),
+        ])
+        self.assertEqual(self.go(model, verify=True), "done")
+        self.assertEqual(len(model.prompts), 3)
+
+    def test_end_condition_is_removed_from_an_earlier_step(self):
+        tests_pass = {"type": "command_succeeds", "command": "python3 -m unittest"}
+        exists = {"type": "file_exists", "path": "calc.py"}
+        steps = [
+            {"description": "run the tests to see what fails", "checks": [dict(tests_pass)]},
+            {"description": "fix calc.py", "checks": [dict(exists)]},
+            {"description": "run the tests again", "checks": [dict(tests_pass)]},
+        ]
+        removed = defer_repeated_commands(steps)
+        self.assertEqual([s["checks"] for s in steps], [[], [exists], [tests_pass]])
+        self.assertEqual(removed, [{"step": 1, **tests_pass}])
+
+    def test_late_checks_replace_a_blind_guess_before_the_step_runs(self):
+        ws = self.toolbox.workspace
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "app.py").write_text("from users import get_usr\n")
+        model = FakeModel([
+            plan_with("rename in app.py", [{"type": "file_contains", "path": "app.py", "text": "def get_user"}]),
+            call("read_file", path="app.py"),  # the check writer looks first
+            call("set_checks", checks=[{"type": "file_lacks", "path": "app.py", "text": "get_usr"}]),
+            call("edit_file", path="app.py", old_text="get_usr", new_text="get_user"),
+            finish("done"),
+        ])
+        self.assertEqual(self.go(model, verify=True, late_checks=True), "done")
+        step = self.store.list_steps(self.run_id)[0]
+        self.assertEqual(json.loads(step["checks"]), [{"type": "file_lacks", "path": "app.py", "text": "get_usr"}])
+        writer_tools = [t["function"]["name"] for t in model.tools[1]]
+        self.assertIn("set_checks", writer_tools)
+        self.assertNotIn("edit_file", writer_tools)
+        self.assertNotIn("run_command", writer_tools)
+        self.assertIn("def get_user", model.prompts[1][1]["content"])  # the draft is shown for correction
+
+    def test_late_checks_keep_the_draft_when_the_writer_gives_nothing_usable(self):
+        draft = [{"type": "file_exists", "path": "a.txt"}]
+        model = FakeModel([
+            plan_with("write a.txt", draft),
+            {"message": {"content": "I think the checks are fine."}},
+            {"message": {"content": "Still fine."}},
+            call("write_file", path="a.txt", content="A"), finish("done"),
+        ])
+        self.assertEqual(self.go(model, verify=True, late_checks=True), "done")
+        self.assertEqual(json.loads(self.store.list_steps(self.run_id)[0]["checks"]), draft)
 
     def test_malformed_checks_are_dropped_and_the_inspector_takes_over(self):
         checks = [{"type": "file_is_nice", "path": "a.txt"}, {"type": "file_contains", "path": "a.txt"},
