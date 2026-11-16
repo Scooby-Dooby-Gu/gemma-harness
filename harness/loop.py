@@ -56,6 +56,8 @@ def tool_loop(
                 "tokens_in": tokens_in,
                 "tokens_out": resp.get("eval_count", 0),
                 "seconds": round(resp.get("total_duration", 0) / 1e9, 1),
+                # Time spent reading the prompt. Small when the model's cache covered most of it.
+                "prompt_seconds": round(resp.get("prompt_eval_duration", 0) / 1e9, 2),
             },
         )
         if tokens_in > 0.85 * client.num_ctx:

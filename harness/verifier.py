@@ -19,29 +19,13 @@ from .client import Ollama
 from .executor import StepResult
 from .loop import tool_loop
 from .store import Store
+from .review import review_kit, review_messages
 from .tools import Toolbox
 
-SYSTEM = """You check another assistant's work. It says a step is complete. Find out whether that is true by inspecting the workspace with the tools.
+INSTRUCTIONS = """Your job now: check another assistant's work. It says a step is complete. Find out whether that is true by inspecting the workspace with the tools.
 Do not assume anything. Open the files and look. If a file that should exist is missing, or its content does not do what the step requires, the step fails.
 Judge only this one step, not the whole task. Small style issues are not failures.
-When you have checked, call the verdict tool. Never answer in plain text."""
-
-VERDICT_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "verdict",
-        "description": "Give the result of your check.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "passed": {"type": "boolean", "description": "true only if you confirmed the step is complete."},
-                "reason": {"type": "string", "description": "One or two sentences on what you checked and found."},
-            },
-            "required": ["passed", "reason"],
-        },
-    },
-}
-
+When you have checked, call the verdict tool."""
 
 @dataclass
 class Verdict:
@@ -120,7 +104,7 @@ def verify_step(
                           "so it is accepted as a look-only step without proof.")
 
     # Layer 3: an independent look at the workspace by the model.
-    inspector = Toolbox(toolbox.workspace, commands=toolbox.commands, read_only=True, web=toolbox.web)
+    inspector, schemas = review_kit(toolbox)
     parts = [
         f"Overall task (for context only): {run['goal']}",
         f"Step to check: {step['description']}",
@@ -143,12 +127,13 @@ def verify_step(
             "step and its completion condition, not from the expected text, whether the step is complete."
         )
     prompt = "\n\n".join(parts)
-    log("prompt", {"system": SYSTEM, "user": prompt})
+    messages = review_messages(INSTRUCTIONS, prompt)
+    log("prompt", {"system": messages[0]["content"], "user": messages[1]["content"]})
 
     loop = tool_loop(
         client,
-        [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
-        inspector.schemas() + [VERDICT_SCHEMA],
+        messages,
+        schemas,
         inspector.call,
         "verdict",
         _check_verdict,
@@ -167,11 +152,11 @@ def verify_step(
     return done(_as_bool(loop.args["passed"]), reason)
 
 
-GOAL_SYSTEM = """You check whether a whole task has really been completed. Another assistant worked on it and says it is finished.
+GOAL_INSTRUCTIONS = """Your job now: check whether a whole task has really been completed. Another assistant worked on it and says it is finished.
 Do not assume anything. Inspect the workspace with the tools: open the files, and run the tests or the program if you can.
 The task is complete only if everything it asks for is true right now. Work that was only looked at, or only partly done, is not complete.
 Small style issues are not failures.
-When you have checked, call the verdict tool. If it is not complete, say exactly what is still missing or wrong. Never answer in plain text."""
+When you have checked, call the verdict tool. If it is not complete, say exactly what is still missing or wrong."""
 
 
 def verify_goal(store: Store, client: Ollama, toolbox: Toolbox, run_id: int, max_tool_calls: int = 6, on_tool=None) -> Verdict:
@@ -184,15 +169,16 @@ def verify_goal(store: Store, client: Ollama, toolbox: Toolbox, run_id: int, max
         store.event(run_id, None, kind, {"phase": "final", **payload})
 
     run = store.get_run(run_id)
-    inspector = Toolbox(toolbox.workspace, commands=toolbox.commands, read_only=True, web=False)
+    inspector, schemas = review_kit(toolbox)
     prompt = f"Task to check: {run['goal']}"
     if inspector.commands != "off":
         prompt += "\n\nYou may run commands, such as tests, to check the work."
-    log("prompt", {"system": GOAL_SYSTEM, "user": prompt})
+    messages = review_messages(GOAL_INSTRUCTIONS, prompt)
+    log("prompt", {"system": messages[0]["content"], "user": messages[1]["content"]})
     loop = tool_loop(
         client,
-        [{"role": "system", "content": GOAL_SYSTEM}, {"role": "user", "content": prompt}],
-        inspector.schemas() + [VERDICT_SCHEMA],
+        messages,
+        schemas,
         inspector.call,
         "verdict",
         _check_verdict,

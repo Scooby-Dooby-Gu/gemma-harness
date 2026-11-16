@@ -344,6 +344,49 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(self.go(model, verify=True, late_checks=True), "done")
         self.assertEqual(json.loads(self.store.list_steps(self.run_id)[0]["checks"]), draft)
 
+    def test_reviewing_roles_share_one_prompt_start_and_tool_list(self):
+        # Check writer, step inspector and goal inspector must begin identically for the model's cache.
+        model = FakeModel([
+            plan("write a.txt"),
+            call("set_checks", checks=[{"type": "file_contains", "path": "a.txt", "text": "ZZZ"}]),  # writer
+            call("write_file", path="a.txt", content="A"), finish("done"),
+            verdict(True, "a.txt is written"),  # step inspector (the text check is disputed)
+            verdict(True, "task complete"),  # goal inspector
+        ])
+        self.assertEqual(self.go(model, verify=True, late_checks=True, final_check=True), "done")
+        writer, step_check, goal_check = 1, 4, 5
+        systems = {model.prompts[i][0]["content"] for i in (writer, step_check, goal_check)}
+        self.assertEqual(len(systems), 1)
+        tool_lists = {json.dumps(model.tools[i]) for i in (writer, step_check, goal_check)}
+        self.assertEqual(len(tool_lists), 1)
+        self.assertIn("write the automatic checks", model.prompts[writer][1]["content"])
+        self.assertIn("whole task", model.prompts[goal_check][1]["content"])
+
+    def test_check_writer_cannot_run_commands(self):
+        toolbox = Toolbox(self.toolbox.workspace, commands="auto")
+        model = FakeModel([
+            plan("write a.txt"),
+            call("run_command", command="touch sneaky.txt"),
+            call("set_checks", checks=[{"type": "file_exists", "path": "a.txt"}]),
+            call("write_file", path="a.txt", content="A"), finish("done"),
+        ])
+        status = run(self.store, model, toolbox, self.run_id, report=lambda *_: None,
+                     memory=False, final_check=False)
+        self.assertEqual(status, "done")
+        self.assertFalse((toolbox.workspace / "sneaky.txt").exists())
+
+    def test_step_prompts_start_the_same_from_one_step_to_the_next(self):
+        model = FakeModel([
+            plan("write a.txt", "write b.txt"),
+            call("write_file", path="a.txt", content="A"), finish("done", facts=["a.txt holds A"]),
+            call("write_file", path="b.txt", content="B"), finish("done"),
+        ])
+        self.assertEqual(self.go(model), "done")
+        first, second = model.prompts[1][1]["content"], model.prompts[3][1]["content"]
+        shared = os.path.commonprefix([first, second])
+        self.assertIn("2. write b.txt", shared)  # goal and plan are identical; only what follows differs
+        self.assertIn("You are on step 2 of 2. Finished: 1.", second)
+
     def test_malformed_checks_are_dropped_and_the_inspector_takes_over(self):
         checks = [{"type": "file_is_nice", "path": "a.txt"}, {"type": "file_contains", "path": "a.txt"},
                   {"type": "command_succeeds", "command": "true"}, "nonsense"]  # commands are off here

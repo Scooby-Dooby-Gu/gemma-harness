@@ -49,14 +49,21 @@ def build_step_prompt(
     current = next(s for s in steps if s["id"] == step_id)
     visible = [s for s in steps if s["status"] != "skipped"]
 
+    # Ordered from what stays the same between steps to what changes, so that consecutive
+    # prompts begin identically and the model's cache can skip the shared part.
     head = [f"Overall goal: {run['goal']}"]
+    progress = []
     if len(visible) > 1:
-        plan = []
-        for n, s in enumerate(visible, 1):
-            mark = "  <-- current step" if s["id"] == step_id else ""
-            status = "now" if s["id"] == step_id else s["status"]
-            plan.append(f"{n}. [{status}] {_clip(s['description'], 110)}{mark}")
-        head.append("Plan:\n" + "\n".join(plan))
+        head.append("Plan:\n" + "\n".join(f"{n}. {_clip(s['description'], 110)}" for n, s in enumerate(visible, 1)))
+        number = {s["id"]: n for n, s in enumerate(visible, 1)}
+        done = [str(number[s["id"]]) for s in visible if s["status"] == "done"]
+        failed = [str(number[s["id"]]) for s in visible if s["status"] == "failed"]
+        state = f"You are on step {number[step_id]} of {len(visible)}."
+        if done:
+            state += f" Finished: {', '.join(done)}."
+        if failed:
+            state += f" Failed: {', '.join(failed)}."
+        progress.append(state)
 
     task = [f"Current step: {current['description']}"]
     if current["done_when"]:
@@ -84,12 +91,14 @@ def build_step_prompt(
 
     def assemble(fact_list: list[str], recent_list: list[str], remembered: str = "") -> str:
         parts = list(head)
-        if remembered:
-            parts.append(remembered)
-        if recent_list:
-            parts.append("Results of the most recent steps:\n" + "\n".join(recent_list))
+        # Facts only ever get added to, oldest first, so this block also starts the same each step.
         if fact_list:
             parts.append("Known facts from earlier steps:\n" + "\n".join(f"- {f}" for f in reversed(fact_list)))
+        parts.extend(progress)
+        if recent_list:
+            parts.append("Results of the most recent steps:\n" + "\n".join(recent_list))
+        if remembered:
+            parts.append(remembered)
         parts.extend(task)
         parts.append("Do only the current step, then call finish.")
         return "\n\n".join(parts)
