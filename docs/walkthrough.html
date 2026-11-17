@@ -175,11 +175,12 @@ td.n, th.n { text-align: right; }
         <tbody>
           <tr><td>Before the goal check</td><td>planner</td><td class="n">11 of 12</td><td class="n">1</td><td class="n">143</td><td class="n">1,787</td></tr>
           <tr><td>With the goal check</td><td>planner</td><td class="n pass">12 of 12</td><td class="n">0</td><td class="n">317</td><td class="n">4,533</td></tr>
-          <tr><td>With the goal check</td><td>late check writer</td><td colspan="4">stopped early when the machine ran short of memory; to be rerun</td></tr>
+          <tr><td>Goal check shown the files and check results first</td><td>planner</td><td class="n">11 of 12</td><td class="n">0</td><td class="n">245</td><td class="n">2,919</td></tr>
+          <tr><td>Goal check shown the files and check results first</td><td>late check writer</td><td class="n">11 of 12</td><td class="n">0</td><td class="n">399</td><td class="n">9,545</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="note">Each batch is two runs of each task on one machine, so these are rough. The goal check removed the false done and more than doubled the model calls.</p>
+    <p class="note">Each batch is two runs of each task on one machine, so these are rough. The goal check removed the false done and more than doubled the model calls. Showing it the files and check results first brought the calls back down to 245 with no false done. The one failure in that batch was the planner never submitting a plan. Writing the checks late took about twice as long per task and passed no more runs.</p>
   </section>
 </div>
 
@@ -432,7 +433,7 @@ const LAYERS = [
       "+   \"The tests in test_calc.py passed successfully ...",
       "     calc.py correctly implements add and average.\""
     ],
-    note: "This layer is the most expensive one today. In run 47 the fix took 52 seconds of model time and this check took 241. In run 43 it ran out of look-ups, answered no, and caused a re-plan of work that was already correct. A change that hands it the files and check results up front, and treats running out as undecided, is written but not in the repo yet."
+    note: "This layer is the most expensive one today. In run 47 the fix took 52 seconds of model time and this check took 241. In run 43 it ran out of look-ups, answered no, and caused a re-plan of work that was already correct. It now gets the files and check results up front, and running out of look-ups counts as undecided instead of failed. That cut its calls from about 8.7 per run to about 4.6."
   },
   {
     id: "remember", name: "Remember", loop: false, model: true, file: "memory.py",
