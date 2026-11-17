@@ -142,7 +142,13 @@ def run(
                 # Every step passing does not prove the task is finished: the plan may have left work out.
                 report("\nFinal check of the whole task…")
                 verdict = verify_goal(store, client, toolbox, run_id, on_tool=on_tool)
-                report(f"  FINAL CHECK {'PASSED' if verdict.passed else 'FAILED'}: {verdict.reason}")
+                outcome = "PASSED" if verdict.passed else "UNDECIDED" if verdict.undecided else "FAILED"
+                report(f"  FINAL CHECK {outcome}: {verdict.reason}")
+                if verdict.undecided:
+                    # Every step passed its own check, and nothing was found wrong. Not grounds for more work.
+                    store.event(run_id, None, "warning", {"warning": f"final check undecided. {verdict.reason}"})
+                    return stop("done", "all steps completed and checked, but the final check of the whole task "
+                                        "could not reach a verdict.")
                 if verdict.passed:
                     return stop("done", "all steps completed, and the finished task was checked.")
                 # Recorded as a failed step, so it shows in the log and the re-planner sees the finding.

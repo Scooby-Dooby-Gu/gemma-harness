@@ -14,7 +14,7 @@ Three layers, cheapest first:
 import json
 from dataclasses import dataclass
 
-from .checks import run_checks
+from .checks import describe, run_checks
 from .client import Ollama
 from .executor import StepResult
 from .loop import tool_loop
@@ -31,6 +31,7 @@ When you have checked, call the verdict tool."""
 class Verdict:
     passed: bool
     reason: str
+    undecided: bool = False  # the check ran out of look-ups or broke off, so "not passed" is not a finding
 
 
 def _as_bool(value) -> bool | None:
@@ -153,10 +154,50 @@ def verify_step(
 
 
 GOAL_INSTRUCTIONS = """Your job now: check whether a whole task has really been completed. Another assistant worked on it and says it is finished.
-Do not assume anything. Inspect the workspace with the tools: open the files, and run the tests or the program if you can.
+You are shown the workspace's files and the results of checks the system ran itself just now. Those are reliable. Use the tools only for what they do not settle, such as running the tests or the program.
 The task is complete only if everything it asks for is true right now. Work that was only looked at, or only partly done, is not complete.
 Small style issues are not failures.
 When you have checked, call the verdict tool. If it is not complete, say exactly what is still missing or wrong."""
+
+
+def goal_evidence(store: Store, toolbox: Toolbox, run_id: int, max_chars: int = 6000, per_file: int = 2500) -> str:
+    """What the goal inspector would otherwise spend its first calls finding out: the files and the check results."""
+    parts = []
+    paths = sorted(toolbox.snapshot(200))
+    if not paths:
+        return "The workspace folder is empty."
+    parts.append("Files in the workspace:\n" + "\n".join(paths))
+    left, hidden = max_chars, []
+    for path in paths:
+        try:
+            text = (toolbox.workspace / path).read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not text.strip():
+            parts.append(f"--- {path} (empty file)")
+        elif len(text) <= min(per_file, left):
+            left -= len(text)
+            parts.append(f"--- {path}\n{text.rstrip()}")
+        else:
+            hidden.append(path)
+    if hidden:
+        parts.append("Too long to show here; read them if you need to: " + ", ".join(hidden))
+
+    # Every check the steps carried, run again now. Each was written for one step, so together they prove little.
+    checks = []
+    for step in store.list_steps(run_id):
+        if step["status"] == "done":
+            checks += [c for c in json.loads(step["checks"] or "[]") if c not in checks]
+    lines = [
+        f"{r.status.upper()}: {describe(r.check)}" + (f" ({r.detail})" if r.status == "failed" else "")
+        for r in run_checks(toolbox, checks, store.fetched_urls(run_id)) if r.status != "skipped"
+    ]
+    if lines:
+        parts.append(
+            "Checks the system ran itself just now:\n" + "\n".join(lines) + "\n"
+            "These were written for single steps. All of them passing does not show the whole task is complete."
+        )
+    return "\n\n".join(parts)
 
 
 def verify_goal(store: Store, client: Ollama, toolbox: Toolbox, run_id: int, max_tool_calls: int = 6, on_tool=None) -> Verdict:
@@ -170,7 +211,7 @@ def verify_goal(store: Store, client: Ollama, toolbox: Toolbox, run_id: int, max
 
     run = store.get_run(run_id)
     inspector, schemas = review_kit(toolbox)
-    prompt = f"Task to check: {run['goal']}"
+    prompt = f"Task to check: {run['goal']}\n\n{goal_evidence(store, inspector, run_id)}"
     if inspector.commands != "off":
         prompt += "\n\nYou may run commands, such as tests, to check the work."
     messages = review_messages(GOAL_INSTRUCTIONS, prompt)
@@ -187,8 +228,12 @@ def verify_goal(store: Store, client: Ollama, toolbox: Toolbox, run_id: int, max
         on_tool,
     )
     if loop.args is None:
-        verdict = Verdict(False, f"The final check could not be completed: {loop.reason}")
+        verdict = Verdict(False, f"The final check could not be completed: {loop.reason}", undecided=True)
     else:
-        verdict = Verdict(_as_bool(loop.args["passed"]), str(loop.args.get("reason", "")).strip())
-    store.event(run_id, None, "verify", {"final": True, "passed": verdict.passed, "reason": verdict.reason})
+        passed = _as_bool(loop.args["passed"])
+        # A "no" given after the look-ups ran out means it could not finish checking, not that it found a fault.
+        verdict = Verdict(passed, str(loop.args.get("reason", "")).strip(), not passed and loop.calls > max_tool_calls)
+    store.event(run_id, None, "verify", {
+        "final": True, "passed": verdict.passed, "undecided": verdict.undecided, "reason": verdict.reason,
+    })
     return verdict

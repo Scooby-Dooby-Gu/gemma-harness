@@ -272,6 +272,36 @@ class RunnerTest(unittest.TestCase):
         ])
         self.assertEqual(self.go(model, verify=True, final_check=True, max_replans=0), "failed")
 
+    def test_final_check_is_shown_the_files_and_check_results(self):
+        model = FakeModel([
+            plan_with("write a.txt", [{"type": "file_contains", "path": "a.txt", "text": "hello"}]),
+            call("write_file", path="a.txt", content="hello there"), finish("done"),
+            verdict(True, "a.txt is there"),
+        ])
+        self.assertEqual(self.go(model, verify=True, final_check=True), "done")
+        shown = model.prompts[3][1]["content"]
+        self.assertIn("--- a.txt\nhello there", shown)
+        self.assertIn("PASSED: the file a.txt contains the text: hello", shown)
+
+    def test_final_check_that_runs_out_of_lookups_does_not_cause_more_work(self):
+        looks = [call("read_file", path="a.txt", start_line=n) for n in range(1, 8)]  # one more than the budget
+        model = FakeModel([
+            plan("write a.txt"),
+            call("write_file", path="a.txt", content="A"), finish("done"), verdict(True, "ok"),
+            *looks, verdict(False, "could not verify everything before the tool budget ran out"),
+        ])
+        self.assertEqual(self.go(model, verify=True, final_check=True), "done")
+        self.assertEqual(self.statuses(), ["done"])
+        self.assertEqual(self.store.count_events(self.run_id, "warning"), 1)
+
+    def test_final_check_no_within_its_lookups_still_counts(self):
+        model = FakeModel([
+            plan("write a.txt"),
+            call("write_file", path="a.txt", content="A"), finish("done"), verdict(True, "ok"),
+            call("read_file", path="a.txt"), verdict(False, "a.txt should say B"),
+        ])
+        self.assertEqual(self.go(model, verify=True, final_check=True, max_replans=0), "failed")
+
     def test_check_that_was_already_true_does_not_prove_a_change(self):
         # Half a rename: app.py already contains get_user before the step, so that check proves nothing.
         ws = self.toolbox.workspace

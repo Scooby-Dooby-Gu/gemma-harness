@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gemma harness walkthrough</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: a fixed map of the layers on top (pipeline, then the store and the tools they share),
+   and one layer's detail below it, stepped through with Back / Next. */
+:root {
+  --bg: #eef1f3;
+  --surface: #ffffff;
+  --ink: #17222b;
+  --muted: #5b6b78;
+  --line: #d3dae0;
+  --accent: #0b6b74;        /* the layer you are on */
+  --accent-soft: #dcefF0;
+  --model: #9a5b00;         /* work done by a model call */
+  --model-soft: #fbeed3;
+  --code: #35506b;          /* work done by plain code */
+  --code-soft: #e3eaf2;
+  --good: #1f7a45;
+  --bad: #b3372f;
+  --trace-bg: #f5f7f9;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+  --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #10171c; --surface: #18222a; --ink: #e6edf2; --muted: #93a3b0; --line: #2c3a45;
+    --accent: #5cc4cc; --accent-soft: #12383c;
+    --model: #f0b455; --model-soft: #3b2c10;
+    --code: #9db8d6; --code-soft: #1f2e3d;
+    --good: #5fcf8c; --bad: #f08179; --trace-bg: #121b21;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #10171c; --surface: #18222a; --ink: #e6edf2; --muted: #93a3b0; --line: #2c3a45;
+  --accent: #5cc4cc; --accent-soft: #12383c;
+  --model: #f0b455; --model-soft: #3b2c10;
+  --code: #9db8d6; --code-soft: #1f2e3d;
+  --good: #5fcf8c; --bad: #f08179; --trace-bg: #121b21;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 var(--body); }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 56px; display: flex; flex-direction: column; gap: 20px; }
+h1 { font: 600 30px/1.15 var(--display); margin: 0; text-wrap: balance; }
+h2 { font: 600 22px/1.2 var(--display); margin: 0; text-wrap: balance; }
+h3 { font: 600 13px/1.2 var(--display); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0; }
+p { margin: 0; }
+.lede { color: var(--muted); max-width: 68ch; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--mono); font-size: .88em; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+
+/* --- the map --------------------------------------------------------- */
+.map { display: flex; flex-direction: column; gap: 14px; }
+.track { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; }
+.loop { display: flex; flex-wrap: wrap; gap: 8px; padding: 22px 8px 8px; border: 1px dashed var(--muted); border-radius: 10px; position: relative; flex: 4 1 420px; }
+.loop > span { position: absolute; top: 3px; left: 10px; font: 500 12px var(--display); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.node { flex: 1 1 96px; min-width: 92px; text-align: left; font: inherit; color: inherit; cursor: pointer;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.track > .node { margin-top: 0; }
+.node b { font: 600 15px/1.2 var(--display); }
+.node .who { font-size: 12px; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--code); flex: none; }
+.dot.model { background: var(--model); }
+.node:hover { border-color: var(--muted); }
+.node:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.node.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: inset 0 -3px 0 var(--accent); }
+.node.past b { color: var(--muted); }
+.shared { display: grid; grid-template-columns: 110px 1fr; gap: 8px 12px; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; }
+.shared .lab { font: 600 13px var(--display); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 13px var(--mono); padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+.chip em { font: 500 11px var(--body); font-style: normal; text-transform: uppercase; letter-spacing: .04em; }
+.chip.read { border-color: var(--code); color: var(--ink); background: var(--code-soft); }
+.chip.write { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+.chip.use { border-color: var(--model); color: var(--ink); background: var(--model-soft); }
+.between { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 14px; color: var(--muted); padding: 8px 12px; border: 1px dashed var(--line); border-radius: 8px; }
+.between b { font: 600 13px var(--display); letter-spacing: .05em; text-transform: uppercase; }
+.between.on { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+.node .mem { font-size: 11px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+/* --- controls -------------------------------------------------------- */
+.controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.controls button { font: 500 15px var(--body); padding: 8px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+.controls button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.controls button:disabled { opacity: .45; cursor: default; }
+.count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.hint { color: var(--muted); font-size: 13px; margin-left: auto; }
+
+/* --- detail ---------------------------------------------------------- */
+.detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 20px; }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.head { display: flex; flex-direction: column; gap: 8px; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag { font-size: 13px; padding: 2px 9px; border-radius: 999px; background: var(--code-soft); color: var(--code); font-weight: 500; }
+.tag.model { background: var(--model-soft); color: var(--model); }
+.tag.file { background: transparent; border: 1px solid var(--line); color: var(--muted); font-family: var(--mono); font-size: 12px; }
+ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.io { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.io div { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.io p { font-size: 14px; }
+.trace { background: var(--trace-bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto;
+  font: 13px/1.6 var(--mono); white-space: pre; margin: 0; }
+.trace .m { color: var(--model); } .trace .c { color: var(--code); } .trace .ok { color: var(--good); } .trace .no { color: var(--bad); } .trace .dim { color: var(--muted); }
+.note { font-size: 14px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 10px; }
+.note.warn { border-color: var(--bad); }
+
+/* --- results --------------------------------------------------------- */
+.tablebox { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font: 600 12px var(--display); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+td.n, th.n { text-align: right; }
+.pass { color: var(--good); font-weight: 500; }
+
+@media (max-width: 760px) {
+  .detail, .io { grid-template-columns: 1fr; }
+  .shared { grid-template-columns: 1fr; }
+  .hint { display: none; }
+  h1 { font-size: 25px; }
+}
+@media (prefers-reduced-motion: no-preference) { .node, .chip { transition: background .15s, border-color .15s; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="head">
+    <h1>Gemma harness walkthrough</h1>
+    <p class="lede">A small local model loses track of a long task. This harness keeps the goal, the plan and the progress in a database, and gives the model one small step at a time. Step through the layers below. Each one shows a piece of a real run: task <code>fix-bug</code>, run 47, on <code>gemma4:12b-mlx</code>. The code is at <a href="https://github.com/Scooby-Dooby-Gu/gemma-harness">github.com/Scooby-Dooby-Gu/gemma-harness</a>.</p>
+  </header>
+
+  <section class="card map" aria-label="Map of the layers">
+    <div class="track" id="track"></div>
+    <p class="between" id="between"><b>Between runs</b><span>Layer 10 writes notes once, at the end of a run. Layers 2, 5 and 8 of later runs read them. Nothing else carries over.</span></p>
+    <div class="shared">
+      <span class="lab">Database</span><div class="chips" id="store"></div>
+      <span class="lab">Tools</span><div class="chips" id="tools"></div>
+    </div>
+    <div class="legend">
+      <span><i class="dot model"></i>calls the model</span>
+      <span><i class="dot"></i>plain code, no model</span>
+      <span><span class="chip read"><em>reads</em></span></span>
+      <span><span class="chip write"><em>writes</em></span></span>
+      <span><span class="chip use"><em>can use</em></span></span>
+    </div>
+  </section>
+
+  <div class="controls">
+    <button id="prev" type="button">Back</button>
+    <button id="next" type="button" class="primary">Next layer</button>
+    <span class="count" id="count"></span>
+    <span class="hint">Arrow keys also work. Click any layer on the map to jump.</span>
+  </div>
+
+  <section class="card detail" id="detail" aria-live="polite"></section>
+
+  <section class="card col">
+    <h2>How it is measured</h2>
+    <p class="lede">Six fixed coding tasks run in fresh folders. Code that is separate from the harness grades each result. The number to watch is false done: runs where the harness said done and the grader failed the work.</p>
+    <div class="tablebox">
+      <table>
+        <thead><tr><th>Batch</th><th>Checks written by</th><th class="n">Passed</th><th class="n">False done</th><th class="n">Model calls</th><th class="n">Seconds</th></tr></thead>
+        <tbody>
+          <tr><td>Before the goal check</td><td>planner</td><td class="n">11 of 12</td><td class="n">1</td><td class="n">143</td><td class="n">1,787</td></tr>
+          <tr><td>With the goal check</td><td>planner</td><td class="n pass">12 of 12</td><td class="n">0</td><td class="n">317</td><td class="n">4,533</td></tr>
+          <tr><td>With the goal check</td><td>late check writer</td><td colspan="4">stopped early when the machine ran short of memory; to be rerun</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Each batch is two runs of each task on one machine, so these are rough. The goal check removed the false done and more than doubled the model calls.</p>
+  </section>
+</div>
+
+<script>
+const STORE = ["runs", "steps", "facts", "events", "memory"];
+const TOOLS = ["list_dir", "read_file", "search", "edit_file", "write_file", "run_command", "web_search", "fetch_url"];
+const LOOK = ["list_dir", "read_file", "search"];
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+// Trace lines: prefix decides the colour. m = model, c = code, + = passed, x = failed, # = dim.
+const trace = lines => lines.map(l => {
+  const k = { "m ": "m", "c ": "c", "+ ": "ok", "x ": "no", "# ": "dim" }[l.slice(0, 2)];
+  return k ? `<span class="${k}">${esc(l.slice(2))}</span>` : esc(l);
+}).join("\n");
+
+const LAYERS = [
+  {
+    id: "goal", name: "Goal", loop: false, model: false, file: "__main__.py, runner.py",
+    title: "A goal comes in and becomes a database row",
+    does: [
+      "You give one sentence and a workspace folder.",
+      "The harness records the run in SQLite. From here on the database is the source of truth, and the model's own memory of the task is never relied on.",
+      "A run that stops can be resumed from the database with <code>resume</code>."
+    ],
+    takes: "Your goal, the workspace folder, and options such as whether commands and web access are allowed.",
+    gives: "One row in <code>runs</code> with status <code>running</code>.",
+    reads: [], writes: ["runs"], tools: [],
+    exTitle: "Run 47",
+    ex: [
+      "# command",
+      "python3 -m harness run \"...\" --workspace ./ws --commands auto",
+      "",
+      "# goal",
+      "The tests in test_calc.py fail. Find and fix the bug",
+      "in calc.py so that they pass. Do not change test_calc.py.",
+      "",
+      "# workspace at the start",
+      "calc.py",
+      "test_calc.py"
+    ]
+  },
+  {
+    id: "plan", name: "Plan", loop: false, model: true, file: "planner.py",
+    title: "The model turns the goal into at most 8 steps",
+    does: [
+      "One model call. It sees the goal, the file names, and any notes remembered from earlier runs. It does not see inside any file.",
+      "It must answer by calling <code>submit_plan</code>. If it tries to use another tool or answers in text, it is corrected and asked again, up to 4 times.",
+      "Each step has a description, a done-when sentence and draft checks the harness can run itself.",
+      "Code then tidies the plan. A command check repeated on a later step is dropped from the earlier one, so a look-only step is not asked to make the tests pass."
+    ],
+    takes: "The goal, the list of files, remembered notes.",
+    gives: "Rows in <code>steps</code>, all <code>pending</code>, each with draft checks.",
+    reads: ["runs", "memory"], writes: ["steps", "events"], tools: [],
+    exTitle: "The plan for run 47",
+    ex: [
+      "m submit_plan",
+      "1. Read test_calc.py and calc.py to understand the",
+      "   requirements and current implementation.",
+      "#    draft check: test_calc.py exists, calc.py exists",
+      "2. Run the tests to see the specific failure.",
+      "#    draft check: test_calc.py exists",
+      "3. Fix the bug in calc.py based on the test failures.",
+      "#    draft check: calc.py exists",
+      "4. Run the tests again to verify that the fix works.",
+      "#    draft check: `python3 -m unittest test_calc.py` exits 0"
+    ],
+    note: "Look at step 3. Its draft check, <code>calc.py exists</code>, is already true and proves nothing. The planner wrote it without having seen the files. The next layer exists to fix that."
+  },
+  {
+    id: "late", name: "Late checks", loop: true, model: true, file: "checker.py, review.py",
+    title: "Just before a step runs, its checks are rewritten with the files in view",
+    does: [
+      "A separate, short model conversation. It can look at the workspace with up to 3 look-ups and cannot change anything.",
+      "It sees the goal, the files, what earlier steps found, the step and its draft checks. It answers by calling <code>set_checks</code>.",
+      "Five kinds of check are allowed: <code>file_exists</code>, <code>file_contains</code>, <code>file_lacks</code>, <code>command_succeeds</code>, <code>sources_cited</code>.",
+      "If this call fails, the planner's draft is kept."
+    ],
+    takes: "The step, its draft checks, the facts saved so far.",
+    gives: "The step's final checks, stored on its row.",
+    reads: ["runs", "steps", "facts"], writes: ["steps", "events"], tools: LOOK,
+    exTitle: "Step 3 of run 47 (19.5 seconds)",
+    ex: [
+      "# draft from the planner",
+      "x the file calc.py exists and is not empty",
+      "",
+      "m set_checks",
+      "+ the command `python3 -m unittest test_calc.py` exits with code 0"
+    ],
+    note: "This layer is switched off with <code>--no-late-checks</code>. It adds a model conversation to every step, so it is the main thing the running batch is measuring."
+  },
+  {
+    id: "before", name: "Before", loop: true, model: false, file: "runner.py",
+    title: "The checks are run once before the step, and the files are recorded",
+    does: [
+      "The harness runs the step's checks before the model touches anything.",
+      "A check that is already true cannot count as proof later. Only a check that goes from false to true shows the step did something.",
+      "It also records the size and modified time of every file, so it can see for itself what the step changed."
+    ],
+    takes: "The step's checks and the workspace as it stands.",
+    gives: "A list of checks that were already true, and a snapshot of the files.",
+    reads: ["steps"], writes: [], tools: [],
+    exTitle: "Run 47",
+    ex: [
+      "# before step 3",
+      "c python3 -m unittest test_calc.py   -> exit code 1",
+      "  not true yet, so it can prove the step",
+      "",
+      "# before step 4 (same check, after the fix)",
+      "c python3 -m unittest test_calc.py   -> exit code 0",
+      "  already true, so it proves nothing for step 4"
+    ]
+  },
+  {
+    id: "prompt", name: "Prompt", loop: true, model: false, file: "context.py",
+    title: "A fresh prompt is built from the database for this one step",
+    does: [
+      "Every step starts a new conversation. Nothing from the previous step's conversation is carried over.",
+      "What carries over is what was saved: the plan, the short results of recent steps, and facts from steps that passed their checks.",
+      "The parts that stay the same from step to step come first and the parts that change come last, so the model can reuse what it has already read."
+    ],
+    takes: "The goal, the plan, facts, recent results, remembered notes.",
+    gives: "Two messages: the system prompt and the step prompt. In run 47 this was about 1,400 tokens of a 16,384-token window.",
+    reads: ["runs", "steps", "facts", "memory"], writes: ["events"], tools: [],
+    exTitle: "The prompt for step 3, shortened",
+    ex: [
+      "Overall goal: The tests in test_calc.py fail. Find and",
+      "fix the bug in calc.py so that they pass. ...",
+      "",
+      "Plan:",
+      "1. Read test_calc.py and calc.py ...",
+      "2. Run the tests ... to see the specific failure.",
+      "3. Fix the bug in calc.py based on the test failures.",
+      "4. Run the tests again to verify that the fix works.",
+      "",
+      "Known facts from earlier steps:",
+      "- The average function in calc.py currently divides by",
+      "  len(numbers) + 1, but it should divide by len(numbers).",
+      "- test_average failed because average([2, 4, 6])",
+      "  returned 3.0 instead of 4.",
+      "",
+      "You are on step 3 of 4. Finished: 1, 2.",
+      "",
+      "Current step: Fix the bug in calc.py based on the",
+      "test failures.",
+      "The step is done when: calc.py is updated to pass the tests.",
+      "After you finish, the system will automatically check that:",
+      "- the command `python3 -m unittest test_calc.py` exits with code 0"
+    ]
+  },
+  {
+    id: "execute", name: "Execute", loop: true, model: true, file: "executor.py, loop.py, tools.py",
+    title: "The model works on the step by calling tools, then calls finish",
+    does: [
+      "A loop: the model asks for a tool, the harness runs it and returns the result, and so on. The budget is 8 tool calls per step.",
+      "The step ends when the model calls <code>finish</code> with a status, a summary and any facts worth keeping.",
+      "File tools cannot leave the workspace. Commands run in a macOS sandbox that limits file writes to the workspace and temp folders. Risky commands need approval.",
+      "Guards in the loop: the same call is refused a third time, replies are capped at 4,096 tokens, and a text-only reply gets one reminder to call a tool."
+    ],
+    takes: "The prompt and the tool list.",
+    gives: "A claim: done, failed or blocked, with a summary. It is not believed yet.",
+    reads: [], writes: ["events"], tools: TOOLS,
+    exTitle: "Step 3 of run 47 (4 model calls, 19 seconds)",
+    ex: [
+      "m read_file   calc.py",
+      "c   5: def average(numbers): ...",
+      "m edit_file   calc.py",
+      "c   Replaced 1 occurrence in calc.py.",
+      "m run_command python3 -m unittest test_calc.py",
+      "c   exit code 0",
+      "m finish      status: done",
+      "    \"Fixed the bug in calc.py by changing the divisor",
+      "     in the average function and verified the fix by",
+      "     running the tests.\""
+    ],
+    note: "<code>web_search</code> and <code>fetch_url</code> exist only when the run is started with <code>--web</code>, and <code>run_command</code> only when commands are allowed."
+  },
+  {
+    id: "verify", name: "Verify", loop: true, model: true, file: "verifier.py, checks.py",
+    title: "A done claim is checked in three layers, cheapest first",
+    does: [
+      "<b>1. Evidence.</b> If no tool call succeeded during the step, it is rejected.",
+      "<b>2. Code checks.</b> The harness runs the step's checks itself. A failed check rejects the step. A check that newly became true accepts it.",
+      "<b>3. Inspector.</b> A separate model conversation with a clean context and look-only file tools, up to 5 look-ups. It never sees the summary the worker wrote. It runs when no check could run, when the step changed files but nothing newly became true, or when only a text check failed, since that text was a guess.",
+      "A step that changed no files and whose checks were already true is accepted as a look-only step. Whether the task is finished is left to the goal check.",
+      "Facts from a step are saved only after it passes."
+    ],
+    takes: "The claim, the files that changed, the checks, the list of checks that were already true.",
+    gives: "The step marked <code>done</code> and its facts saved, or a rejection with a finding.",
+    reads: ["steps"], writes: ["steps", "facts", "events"], tools: LOOK.concat(["run_command"]),
+    exTitle: "Run 47",
+    ex: [
+      "# step 3: files changed: calc.py",
+      "c python3 -m unittest test_calc.py",
+      "+ PASSED: exited with code 0, and it was false before",
+      "  the step. Accepted. No model call needed.",
+      "",
+      "# step 1: only read files",
+      "c test_calc.py exists",
+      "# true, but it was already true before the step",
+      "+ ACCEPTED as a look-only step, without proof."
+    ],
+    note: "The inspector is the model-calling part here. In run 47 it was never needed, so this layer cost no model calls."
+  },
+  {
+    id: "recover", name: "Recover", loop: true, model: true, file: "runner.py, planner.py",
+    title: "A rejected step is retried once, then the rest of the work is re-planned",
+    does: [
+      "A rejected step goes back in the queue once, and its next prompt includes the finding from the check.",
+      "If it fails again, the steps still waiting are skipped and the planner is asked to plan the remaining work a different way. It is shown remembered notes picked for the failed step.",
+      "Limits per session: 2 re-plans, a cap on step attempts, and a time limit. When one is reached the run ends as failed and can be resumed."
+    ],
+    takes: "The failed step and why it failed.",
+    gives: "New pending steps, or a run that ends as failed.",
+    reads: ["runs", "steps", "facts", "memory"], writes: ["steps", "events"], tools: [],
+    exTitle: "Run 44, task todo-app (run 47 never needed this)",
+    ex: [
+      "+ 1 done     Create a README.md ...",
+      "+ 2 done     Create todo.py with add and list ...",
+      "x 3 failed   Update todo.py to include the done command.",
+      "#            The model stopped without calling finish.",
+      "# 4 skipped  Create and run a test script ...",
+      "",
+      "m submit_plan   (re-plan)",
+      "+ 5 done     Read todo.py and todo.json ...",
+      "+ 6 done     Update todo.py to include the done command ...",
+      "+ 7 done     Verify the done command works ..."
+    ]
+  },
+  {
+    id: "goalcheck", name: "Goal check", loop: false, model: true, file: "verifier.py",
+    title: "When no steps are left, the task itself is checked",
+    does: [
+      "Every step can pass while the plan left the real work out. So a separate model conversation, with a clean context, checks the goal against the workspace. It has up to 6 look-ups.",
+      "If it passes, the run ends as done.",
+      "If it fails, the finding is recorded as a failed step and the missing work is planned, within the same re-plan limit."
+    ],
+    takes: "Only the goal and the workspace. Nothing the worker said.",
+    gives: "The run ends as <code>done</code>, or new steps are planned.",
+    reads: ["runs"], writes: ["steps", "events"], tools: LOOK.concat(["run_command"]),
+    exTitle: "Run 47 (9 model calls, 241 seconds)",
+    ex: [
+      "m list_dir    .",
+      "m run_command python3 -m pytest test_calc.py",
+      "c   exit code 1: No module named pytest",
+      "m run_command python3 test_calc.py",
+      "c   exit code 0",
+      "m read_file   calc.py",
+      "m read_file   test_calc.py",
+      "# one reply ran to the 4,096-token cap (179 seconds)",
+      "m verdict     passed: true",
+      "+   \"The tests in test_calc.py passed successfully ...",
+      "     calc.py correctly implements add and average.\""
+    ],
+    note: "This layer is the most expensive one today. In run 47 the fix took 52 seconds of model time and this check took 241. In run 43 it ran out of look-ups, answered no, and caused a re-plan of work that was already correct. A change that hands it the files and check results up front, and treats running out as undecided, is written but not in the repo yet."
+  },
+  {
+    id: "remember", name: "Remember", loop: false, model: true, file: "memory.py",
+    title: "At the end, a few notes are kept for later runs",
+    does: [
+      "This is the only thing that connects one run to the next. One model call distils the run into notes about this project and general lessons, by calling <code>save_notes</code>.",
+      "Later runs on the same project are shown the project notes, plus short digests of similar earlier runs. Three layers read them: Plan, Prompt and Recover. The check writer, the inspector and the goal check never see them, so a wrong note can mislead the work but not the checking.",
+      "A problem in this layer never changes the run's outcome. Test tasks keep their notes apart from yours."
+    ],
+    takes: "The finished run: its goal, steps and results.",
+    gives: "Rows in <code>memory</code>.",
+    reads: ["runs", "steps", "facts"], writes: ["memory", "events"], tools: [],
+    exTitle: "Notes saved by earlier fix-bug runs",
+    ex: [
+      "# project notes (run 20)",
+      "- The average function is implemented in calc.py.",
+      "- Run tests using python3 -m unittest test_calc.py.",
+      "- test_calc.py contains the tests for calc.py.",
+      "",
+      "# lessons (run 19)",
+      "- Always run the current test suite to verify the",
+      "  existing state before attempting any modifications."
+    ],
+    note: "The project notes are useful. The lessons so far are generic, and there is no evidence yet that they improve later runs."
+  }
+];
+
+let at = 0;
+const $ = id => document.getElementById(id);
+
+function nodeHtml(l, i) {
+  return `<button type="button" class="node" data-i="${i}"><b>${i + 1}. ${l.name}</b>` +
+    `<span class="who"><i class="dot${l.model ? " model" : ""}"></i>${l.model ? "model" : "code"}</span>` +
+    (l.writes.includes("memory") ? `<span class="mem">writes notes</span>` : l.reads.includes("memory") ? `<span class="mem">reads notes</span>` : "") + `</button>`;
+}
+
+function buildTrack() {
+  let html = "", inLoop = false;
+  LAYERS.forEach((l, i) => {
+    if (l.loop && !inLoop) { html += `<div class="loop"><span>Repeats for each step</span>`; inLoop = true; }
+    if (!l.loop && inLoop) { html += `</div>`; inLoop = false; }
+    html += nodeHtml(l, i);
+  });
+  $("track").innerHTML = html + (inLoop ? "</div>" : "");
+  $("track").addEventListener("click", e => {
+    const b = e.target.closest(".node");
+    if (b) show(+b.dataset.i);
+  });
+}
+
+function show(i) {
+  at = Math.max(0, Math.min(LAYERS.length - 1, i));
+  const l = LAYERS[at];
+  document.querySelectorAll(".node").forEach((n, j) => {
+    n.classList.toggle("on", j === at);
+    n.classList.toggle("past", j < at);
+    if (j === at) n.setAttribute("aria-current", "step"); else n.removeAttribute("aria-current");
+  });
+  $("store").innerHTML = STORE.map(t => {
+    const w = l.writes.includes(t), r = l.reads.includes(t);
+    const label = w && r ? "reads, writes" : w ? "writes" : r ? "reads" : "";
+    return `<span class="chip ${w ? "write" : r ? "read" : ""}">${t}${label ? `<em>${label}</em>` : ""}</span>`;
+  }).join("");
+  $("tools").innerHTML = TOOLS.map(t =>
+    `<span class="chip ${l.tools.includes(t) ? "use" : ""}">${t}</span>`).join("") +
+    (l.tools.length ? "" : `<span class="chip"><em>none in this layer</em></span>`);
+  $("detail").innerHTML =
+    `<div class="col">
+       <div class="head">
+         <h3>Layer ${at + 1} of ${LAYERS.length}${l.loop ? " · inside the step loop" : ""}</h3>
+         <h2>${l.title}</h2>
+         <div class="tags">
+           <span class="tag ${l.model ? "model" : ""}">${l.model ? "Calls the model" : "Plain code, no model"}</span>
+           ${l.file.split(", ").map(f => `<span class="tag file">harness/${f}</span>`).join("")}
+         </div>
+       </div>
+       <ul>${l.does.map(d => `<li>${d}</li>`).join("")}</ul>
+       <div class="io">
+         <div><h3>Takes in</h3><p>${l.takes}</p></div>
+         <div><h3>Hands on</h3><p>${l.gives}</p></div>
+       </div>
+     </div>
+     <div class="col">
+       <h3>${l.exTitle}</h3>
+       <pre class="trace">${trace(l.ex)}</pre>
+       ${l.note ? `<p class="note${l.id === "goalcheck" ? " warn" : ""}">${l.note}</p>` : ""}
+     </div>`;
+  $("between").classList.toggle("on", l.reads.includes("memory") || l.writes.includes("memory"));
+  $("count").textContent = `${at + 1} of ${LAYERS.length}`;
+  $("prev").disabled = at === 0;
+  $("next").disabled = at === LAYERS.length - 1;
+}
+
+buildTrack();
+show(0);
+$("prev").addEventListener("click", () => show(at - 1));
+$("next").addEventListener("click", () => show(at + 1));
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") show(at + 1);
+  if (e.key === "ArrowLeft") show(at - 1);
+});
+</script>
+</body>
+</html>
